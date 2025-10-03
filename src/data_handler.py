@@ -11,7 +11,6 @@ HOME_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", ".."))
 # Config/paths
 DATA_DIR = Path(os.path.join(HOME_DIR, "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-WALLETS_CSV = DATA_DIR / "wallet_db.csv"
 
 def _fix_pyarrow_period_double_registration():
     # Only relevant when using pyarrow; harmless otherwise.
@@ -28,8 +27,8 @@ _SCHEMA = {
     "price": "float32",
     "size": "float32",
     "time": "datetime64[ns]",
-    "is_ask": "bool",
-    "wallet_id": "uint32",
+    "seller": "uint64",
+    "buyer": "uint64",
 }
 
 class CoinDataStore:
@@ -111,22 +110,22 @@ class CoinDataStore:
             except Exception as e:
                 logger.warning(f"Column {col} cast to float32 failed in {path.name}: {e}")
 
-        # bools (fastparquet may yield object if nulls): coerce via pandas BooleanDtype then to bool
+        # uint64 (need fillna first)
         try:
-            df["is_ask"] = df["is_ask"].astype("boolean").fillna(False).astype(bool)
+            df["seller"] = pd.to_numeric(df["seller"], errors="coerce").fillna(0).astype("uint64")
         except Exception as e:
-            logger.warning(f"Column is_ask cast to bool failed in {path.name}: {e}")
-            df["is_ask"] = df["is_ask"].fillna(False).astype(bool)
+            logger.warning(f"Column seller cast to uint64 failed in {path.name}: {e}")
+            df["seller"] = pd.to_numeric(df["seller"], errors="coerce").fillna(0).astype("uint64")
 
-        # uint32 (need fillna first)
+        # uint64 (need fillna first)
         try:
-            df["wallet_id"] = pd.to_numeric(df["wallet_id"], errors="coerce").fillna(0).astype("uint32")
+            df["buyer"] = pd.to_numeric(df["buyer"], errors="coerce").fillna(0).astype("uint64")
         except Exception as e:
-            logger.warning(f"Column wallet_id cast to uint32 failed in {path.name}: {e}")
-            df["wallet_id"] = pd.to_numeric(df["wallet_id"], errors="coerce").fillna(0).astype("uint32")
+            logger.warning(f"Column buyer cast to uint64 failed in {path.name}: {e}")
+            df["buyer"] = pd.to_numeric(df["buyer"], errors="coerce").fillna(0).astype("uint64")
 
         # Column order & drop bad times
-        df = df[["price", "size", "time", "is_ask", "wallet_id"]]
+        df = df[["price", "size", "time", "seller", "buyer"]]
         df = df.dropna(subset=["time"])
         return df
 
@@ -134,14 +133,14 @@ class CoinDataStore:
         if df.empty:
             return df.astype(_SCHEMA)
 
-        df = df.drop_duplicates(subset=["time", "wallet_id", "price", "size", "is_ask"], keep="last")
+        df = df.drop_duplicates(subset=["time", "price", "size", "buyer", "seller"], keep="last")
         df = df.sort_values("time")
 
         # Reassert dtypes (idempotent)
         df["price"] = df["price"].astype("float32")
         df["size"] = df["size"].astype("float32")
-        df["is_ask"] = df["is_ask"].astype("bool")
-        df["wallet_id"] = df["wallet_id"].astype("uint32")
+        df["buyer"] = df["buyer"].astype("uint64")
+        df["seller"] = df["seller"].astype("uint64")
         return df
 
     # ---------- APIs ----------
