@@ -8,7 +8,6 @@ from loguru import logger
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 HOME_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", ".."))
 HL_NODE_TRADES_PATH = os.path.abspath(os.path.join(HOME_DIR, "hl-node-trades"))
-old_data_dates = os.listdir()
 
 # --- Config/paths ---
 DATA_DIR = Path(os.path.join(HOME_DIR, "data"))
