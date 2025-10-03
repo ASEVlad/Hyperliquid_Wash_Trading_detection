@@ -73,25 +73,26 @@ def retrieve_data(file_path: Path, wallet_map: Dict[str, int], next_id_ref: List
             if not line.strip():
                 continue
             wallet, trade = json.loads(line)
-            wallet_id = get_wallet_id(wallet, wallet_map, next_id_ref, wallets_csv)
-
-            px = trade.get("px")
-            sz = trade.get("sz")
-            # skip malformed
-            if px is None or sz is None:
-                continue
-
-            append(
-                {
-                    "coin": trade.get("coin"),
-                    "price": float(px),
-                    "size": float(sz),
-                    "time": trade.get("time"),
-                    "is_ask": trade.get("side") == "A",
-                    "wallet_id": wallet_id,
-                    "tid": trade.get("tid"),
-                }
-            )
+            if int(trade.get("tid")) != 0:
+                wallet_id = get_wallet_id(wallet, wallet_map, next_id_ref, wallets_csv)
+    
+                px = trade.get("px")
+                sz = trade.get("sz")
+                # skip malformed
+                if px is None or sz is None:
+                    continue
+    
+                append(
+                    {
+                        "coin": trade.get("coin"),
+                        "price": float(px),
+                        "size": float(sz),
+                        "time": trade.get("time"),
+                        "is_ask": trade.get("side") == "A",
+                        "wallet_id": wallet_id,
+                        "tid": trade.get("tid"),
+                    }
+                )
 
     df = pd.DataFrame.from_records(records)
     if df.empty:
