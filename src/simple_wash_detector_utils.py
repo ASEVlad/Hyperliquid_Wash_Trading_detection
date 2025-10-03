@@ -1,29 +1,49 @@
 import numpy as np
 import pandas as pd
 
-def _aggregate_microfills(
-    df_day: pd.DataFrame,
+from src.data_handler import CoinDataStore
+
+
+# --------------------------
+# 1) Helpers
+# --------------------------
+
+def _to_long_per_wallet(df_day: pd.DataFrame) -> pd.DataFrame:
+    if df_day.empty:
+        return pd.DataFrame(columns=["wallet_id","side","time","price","size"])
+
+    df = df_day.copy()
+    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+    df = df.dropna(subset=["time"])
+
+    sells = df[["seller", "time", "price", "size"]].rename(columns={"seller": "wallet_id"}).copy()
+    sells["side"] = "sell"
+
+    buys = df[["buyer", "time", "price", "size"]].rename(columns={"buyer": "wallet_id"}).copy()
+    buys["side"] = "buy"
+
+    long = pd.concat([sells, buys], ignore_index=True)
+
+    # Tidy types
+    long["wallet_id"] = long["wallet_id"].astype("uint64", copy=False)
+    long["price"] = long["price"].astype("float32", copy=False)
+    long["size"] = long["size"].astype("float32", copy=False)
+
+    # Order by time
+    long = long.sort_values("time").reset_index(drop=True)
+    return long
+
+
+def _aggregate_microfills_long(
+    long_df: pd.DataFrame,
     bin_freq: str = "50ms",
     round_mode: str = "ceil",   # "ceil" | "floor" | "round"
 ) -> pd.DataFrame:
-    """
-    Collapse micro-fills into a single print per (wallet_id, is_ask, time_bin).
+    if long_df.empty:
+        return long_df
 
-    - time_bin: time rounded to `bin_freq` (ceil/floor/round)
-    - size: summed within the bin
-    - price: volume-weighted average (VWAP) within the bin
-
-    Returns a DataFrame with the same columns as input (price, size, time, is_ask, wallet_id),
-    but 'time' is replaced by the binned timestamp and rows are aggregated.
-    """
-    if df_day.empty:
-        return df_day
-
-    df = df_day.copy()
-    # Ensure proper dtypes
-    df["time"] = pd.to_datetime(df["time"], errors="coerce")
-    df = df.dropna(subset=["time"])
-    # Choose the binning function
+    df = long_df.copy()
+    # Choose binning variant
     if round_mode == "ceil":
         df["time_bin"] = df["time"].dt.ceil(bin_freq)
     elif round_mode == "floor":
@@ -31,163 +51,153 @@ def _aggregate_microfills(
     else:
         df["time_bin"] = df["time"].dt.round(bin_freq)
 
-    # Guard against nonpositive sizes in VWAP
+    # Remove nonpositive sizes to avoid bad VWAP math
     df = df[df["size"] > 0].copy()
-
-    # Precompute notional for VWAP
     df["notional"] = df["price"] * df["size"]
 
     g = (
-        df.groupby(["wallet_id", "is_ask", "time_bin"], as_index=False)
+        df.groupby(["wallet_id", "side", "time_bin"], as_index=False)
           .agg(size=("size", "sum"), notional=("notional", "sum"))
     )
-    # VWAP = sum(price*size)/sum(size)
-    g["price"] = g["notional"] / g["size"]
+    g["price"] = (g["notional"] / g["size"]).astype("float32")
     g = g.drop(columns=["notional"])
-
-    # Rename back to your schema
     g = g.rename(columns={"time_bin": "time"})
 
-    # Enforce your dtypes (optional, tidy)
-    g["price"] = g["price"].astype("float32")
-    g["size"] = g["size"].astype("float32")
-    g["is_ask"] = g["is_ask"].astype("bool")
-    g["wallet_id"] = g["wallet_id"].astype("uint32")
-
-    # Sort by time (needed later for merge_asof)
-    g = g.sort_values("time").reset_index(drop=True)
+    # Keep dtypes tidy & sort for asof
+    g["time"] = pd.to_datetime(g["time"], errors="coerce")
+    g = g.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
+    g["wallet_id"] = g["wallet_id"].astype("uint64", copy=False)
+    g["size"] = g["size"].astype("float32", copy=False)
     return g
 
 
-def detect_wash_trades_nearest(
-    store: "CoinDataStore",
-    time_diff_s: int,
-    price_diff_pct: float,
-    size_diff_pct: float,          # tolerance for size match, e.g. 0.02 for ±2%
-    bin_freq: str = "50ms",        # micro-fill aggregation window
-    round_mode: str = "ceil",      # how to align bins: "ceil" matches your note
-) -> pd.DataFrame:
-    """
-    Simple wash trading detection with micro-fill aggregation + nearest-neighbor pairing.
+def _one_direction_pair(open_df: pd.DataFrame, close_df: pd.DataFrame,
+                        time_diff_s: int, price_diff_pct: float, size_diff_pct: float,
+                        direction_label: str) -> pd.DataFrame:
+    if open_df.empty or close_df.empty:
+        return pd.DataFrame()
 
-    Steps (per day):
-      1) Aggregate micro-fills into 50ms bins per (wallet_id, is_ask).
-         - size = sum
-         - price = VWAP
-      2) For each wallet, pair each open trade with the nearest *forward* opposite-side trade
-         within `time_diff_s` using `pd.merge_asof`.
-      3) Keep pairs where:
-           - abs(price_close - price_open)/price_open  <= price_diff_pct
-           - abs(size_close  - size_open )/size_open   <= size_diff_pct
-      4) Resolve conflicts to enforce 1–to–1 matches (greedy by smallest Δt, then Δp).
+    right = close_df[["wallet_id","time","price","size","row_id"]].rename(
+        columns={"time":"close_time","price":"close_price","size":"close_size","row_id":"close_row_id"}
+    )
+    left = open_df.rename(
+        columns={"time":"open_time","price":"open_price","size":"open_size","row_id":"open_row_id"}
+    )
 
-    Returns one row per flagged pair.
-    """
-    def one_direction_pair(open_df: pd.DataFrame, close_df: pd.DataFrame, direction_label: str) -> pd.DataFrame:
-        if open_df.empty or close_df.empty:
-            return pd.DataFrame()
+    # Guard against zeros to avoid division by zero in size % diff
+    left = left[left["open_size"] > 0].copy()
+    right = right[right["close_size"] > 0].copy()
 
-        right = close_df[["wallet_id", "time", "price", "size", "row_id"]].rename(
-            columns={
-                "time": "close_time",
-                "price": "close_price",
-                "size": "close_size",
-                "row_id": "close_row_id",
-            }
-        )
-        left = open_df.rename(
-            columns={
-                "time": "open_time",
-                "price": "open_price",
-                "size": "open_size",
-                "row_id": "open_row_id",
-            }
-        )
+    # **Important**: merge_asof requires GLOBAL sort by time keys
+    left = left.sort_values("open_time", kind="mergesort").reset_index(drop=True)
+    right = right.sort_values("close_time", kind="mergesort").reset_index(drop=True)
 
-        # Remove zero sizes to avoid divisions in size % diff
-        left = left[left["open_size"] > 0].copy()
-        right = right[right["close_size"] > 0].copy()
+    pairs = pd.merge_asof(
+        left,
+        right,
+        left_on="open_time",
+        right_on="close_time",
+        by="wallet_id",
+        direction="forward",
+        tolerance=pd.Timedelta(seconds=time_diff_s),
+        allow_exact_matches=True,
+    ).dropna(subset=["close_time"])
 
-        # **Important**: global sort by the time keys for merge_asof
-        left = left.sort_values("open_time", kind="mergesort").reset_index(drop=True)
-        right = right.sort_values("close_time", kind="mergesort").reset_index(drop=True)
-
-        pairs = pd.merge_asof(
-            left,
-            right,
-            left_on="open_time",
-            right_on="close_time",
-            by="wallet_id",
-            direction="forward",
-            tolerance=pd.Timedelta(seconds=time_diff_s),
-            allow_exact_matches=True,
-        ).dropna(subset=["close_time"])
-
-        if pairs.empty:
-            return pairs
-
-        # Filters
-        pairs["duration_s"] = (pairs["close_time"] - pairs["open_time"]).dt.total_seconds()
-        pairs["price_change_pct"] = (pairs["close_price"] - pairs["open_price"]).abs() / pairs["open_price"]
-        pairs["size_change_pct"]  = (pairs["close_size"]  - pairs["open_size"]).abs()  / pairs["open_size"]
-
-        pairs = pairs[
-            (pairs["duration_s"] <= time_diff_s)
-            & (pairs["price_change_pct"] <= price_diff_pct)
-            & (pairs["size_change_pct"]  <= size_diff_pct)
-        ]
-        if pairs.empty:
-            return pairs
-
-        pairs = pairs.assign(
-            pairing_direction=direction_label,
-            open_side=pairs["side"],  # side from open leg
-            close_side=np.where(pairs["side"] == "buy", "sell", "buy"),
-        )
-
-        keep_cols = [
-            "wallet_id", "day",
-            "open_row_id", "close_row_id",
-            "open_time", "close_time",
-            "open_side", "close_side",
-            "open_price", "close_price", "price_change_pct",
-            "open_size", "close_size", "size_change_pct",
-            "duration_s", "pairing_direction",
-        ]
-        pairs = pairs[keep_cols].copy()
-
-        # 1–to–1 greedy pruning
-        pairs = pairs.sort_values(
-            ["wallet_id", "duration_s", "price_change_pct", "open_time"],
-            kind="mergesort"
-        )
-        pairs = pairs.drop_duplicates(subset=["wallet_id", "close_row_id"], keep="first")
-        pairs = pairs.drop_duplicates(subset=["wallet_id", "open_row_id"],  keep="first")
+    if pairs.empty:
         return pairs
 
+    # Compute filters
+    pairs["duration_s"] = (pairs["close_time"] - pairs["open_time"]).dt.total_seconds()
+    pairs["price_change_pct"] = (pairs["close_price"] - pairs["open_price"]).abs() / pairs["open_price"]
+    pairs["size_change_pct"]  = (pairs["close_size"]  - pairs["open_size"]).abs()  / pairs["open_size"]
+
+    # Apply thresholds
+    pairs = pairs[
+        (pairs["duration_s"] <= time_diff_s)
+        & (pairs["price_change_pct"] <= price_diff_pct)
+        & (pairs["size_change_pct"] <= size_diff_pct)
+    ]
+    if pairs.empty:
+        return pairs
+
+    # Label sides/direction — the open side is given by open_df; close side is the opposite
+    pairs = pairs.assign(
+        pairing_direction=direction_label,
+        open_side=pairs["side"],  # from 'left' (open_df)
+        close_side=np.where(pairs["side"] == "buy", "sell", "buy"),
+    )
+
+    # Keep only relevant columns before conflict resolution
+    keep_cols = [
+        "wallet_id", "day",
+        "open_row_id", "close_row_id",
+        "open_time", "close_time",
+        "open_side", "close_side",
+        "open_price", "close_price", "price_change_pct",
+        "open_size", "close_size", "size_change_pct",
+        "duration_s", "pairing_direction",
+    ]
+    pairs = pairs[keep_cols].copy()
+
+    # 1–to–1 greedy pruning: prefer smallest Δt, then smallest Δp
+    pairs = pairs.sort_values(
+        ["wallet_id", "duration_s", "price_change_pct", "open_time"],
+        kind="mergesort"
+    )
+    pairs = pairs.drop_duplicates(subset=["wallet_id", "close_row_id"], keep="first")
+    pairs = pairs.drop_duplicates(subset=["wallet_id", "open_row_id"],  keep="first")
+    return pairs
+
+
+# --------------------------
+# 2) Main detector
+# --------------------------
+
+def detect_wash_trades_nearest(
+    store: CoinDataStore,
+    time_diff_s: int,
+    price_diff_pct: float,
+    size_diff_pct: float,
+    bin_freq: str = "50ms",
+    round_mode: str = "ceil",
+) -> pd.DataFrame:
+    """
+    Wash-trading detector for schema: price, size, time, seller, buyer.
+
+    Pipeline (per day):
+      A) Expand to per-wallet events (seller->sell, buyer->buy).
+      B) Aggregate micro-fills in 50 ms bins per (wallet_id, side) using VWAP price.
+      C) Pair nearest-forward opposite-side events within time_diff_s (per wallet).
+      D) Keep only pairs with price & size within tolerances; enforce 1–to–1.
+
+    Returns one row per flagged pair with timings, sides, prices, sizes, and directions.
+    """
     all_events = []
+
     for df_day in store.iter_days():
-        print(len(all_events))
         if df_day.empty:
             continue
 
-        # 1) Aggregate micro-fills first
-        agg = _aggregate_microfills(df_day, bin_freq=bin_freq, round_mode=round_mode)
+        # A) Long view per wallet (buy/sell events)
+        long_df = _to_long_per_wallet(df_day)
+        if long_df.empty:
+            continue
+
+        # B) Aggregate micro-fills
+        agg = _aggregate_microfills_long(long_df, bin_freq=bin_freq, round_mode=round_mode)
         if agg.empty:
             continue
 
-        # Enrich for pairing
-        df = agg.copy()
-        df = df.sort_values("time").reset_index(drop=True)
-        df["side"] = np.where(df["is_ask"], "sell", "buy")
-        df["row_id"] = np.arange(len(df), dtype=np.int64)  # stable within the day
+        df = agg.sort_values("time").reset_index(drop=True).copy()
+        df["row_id"] = np.arange(len(df), dtype=np.int64)  # stable within day
         df["day"] = df["time"].dt.date
 
         buys  = df[df["side"] == "buy"].copy()
         sells = df[df["side"] == "sell"].copy()
 
-        d1 = one_direction_pair(buys,  sells, "buy_to_sell")
-        d2 = one_direction_pair(sells, buys,  "sell_to_buy")
+        # C) Two directions
+        d1 = _one_direction_pair(buys,  sells, time_diff_s, price_diff_pct, size_diff_pct, "buy_to_sell")
+        d2 = _one_direction_pair(sells, buys,  time_diff_s, price_diff_pct, size_diff_pct, "sell_to_buy")
 
         day_events = pd.concat([d1, d2], ignore_index=True)
         if not day_events.empty:
@@ -202,14 +212,17 @@ def detect_wash_trades_nearest(
                 "open_price","close_price","price_change_pct",
                 "open_size","close_size","size_change_pct",
                 "pairing_direction",
-                "open_trade_id","close_trade_id",
+                "pair_id",
             ]
         )
 
     events = pd.concat(all_events, ignore_index=True)
-    events = events.sort_values(["day", "wallet_id", "open_time", "close_time"]).reset_index(drop=True)
-    events["open_trade_id"]  = np.arange(len(events), dtype=np.int64)
-    events["close_trade_id"] = events["open_trade_id"]
+    events = events.sort_values(["day","wallet_id","open_time","close_time"]).reset_index(drop=True)
+
+    # Assign a simple pair_id (one row == one pair)
+    events["pair_id"] = np.arange(len(events), dtype=np.int64)
+
+    # Final tidy order
     events = events[
         [
             "wallet_id","day",
@@ -218,7 +231,59 @@ def detect_wash_trades_nearest(
             "open_price","close_price","price_change_pct",
             "open_size","close_size","size_change_pct",
             "pairing_direction",
-            "open_trade_id","close_trade_id",
+            "pair_id",
         ]
     ]
     return events
+
+
+def detected_to_dfwash_full(df_detected: pd.DataFrame) -> pd.DataFrame:
+    # core dfwash schema
+    mapped = pd.DataFrame({
+        "wallet_id": df_detected["wallet_id"],
+        "price1": df_detected["open_price"],
+        "size1": df_detected["open_size"],
+        "price2": df_detected["close_price"],
+        "size2": df_detected["close_size"],
+        "side1": df_detected["open_side"],
+        "side2": df_detected["close_side"],
+        "t1": pd.to_datetime(df_detected["open_time"], errors="coerce"),
+        "t2": pd.to_datetime(df_detected["close_time"], errors="coerce"),
+        "delta_seconds": df_detected["duration_s"],
+    }, index=df_detected.index)
+
+    # size ratio
+    mapped["size_ratio"] = mapped["size2"] / mapped["size1"].replace(0, np.nan)
+
+    # enforce lightweight dtypes
+    cast = {
+        "wallet_id": "uint32",
+        "price1": "float32", "size1": "float32",
+        "price2": "float32", "size2": "float32",
+        "delta_seconds": "float32", "size_ratio": "float32",
+    }
+    for c, dt in cast.items():
+        if c in mapped.columns:
+            try:
+                mapped[c] = mapped[c].astype(dt, copy=False)
+            except Exception:
+                pass
+
+    # derived cols
+    mapped["direction"] = (mapped["side1"].astype("string") + "->" + mapped["side2"].astype("string")).astype("category")
+    mapped["dt_s"] = mapped["delta_seconds"].astype("float32")
+    mapped["size_err_pct"] = (mapped["size_ratio"] - 1.0).abs().astype("float32") * 100.0
+    base = mapped["price1"].replace(0, np.nan)
+    mapped["price_change_pct"] = ((mapped["price2"] - mapped["price1"]) / base).astype("float32")
+    mapped["abs_price_change_bps"] = (mapped["price_change_pct"].abs() * 1e4).astype("float32")
+    mapped["same_price"] = (mapped["price2"] - mapped["price1"]).abs() <= 1e-8
+    mapped["date"] = mapped["t1"].dt.date
+    mapped["hour"] = mapped["t1"].dt.hour.astype("int16")
+    mapped["dow"] = mapped["t1"].dt.dayofweek.astype("int8")
+
+    # combine original df_detected + mapped features
+    df_full = pd.concat([df_detected.reset_index(drop=True), mapped.reset_index(drop=True)], axis=1)
+    # remove duplicated column names across the whole frame
+    df_full = df_full.loc[:, ~df_full.columns.duplicated()]
+
+    return df_full
