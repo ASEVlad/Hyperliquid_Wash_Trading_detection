@@ -5,7 +5,7 @@ from pathlib import Path
 from loguru import logger
 from typing import Iterable, Iterator, Optional, List
 
-BASE_DIR = os.getcwd()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 HOME_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", ".."))
 
 # Config/paths
