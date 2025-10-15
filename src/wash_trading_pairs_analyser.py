@@ -6,6 +6,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 
+from src.data_handler import CoinDataStore
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ANALYSIS_DIR = Path(os.path.join(BASE_DIR, "..", "..", "analysis"))
 
@@ -136,7 +138,7 @@ def plot_cumulative_pairs(df, out_dir=None, show=False):
     ts = (df.sort_values("t1")
             .assign(n=1)
             .set_index("t1")["n"]
-            .resample("1H").sum().fillna(0).cumsum())
+            .resample("1h").sum().fillna(0).cumsum())
     plt.figure(figsize=(8,4))
     plt.plot(ts.index, ts.values)
     plt.title("Cumulative wash pairs over time (hourly res.)")
@@ -404,12 +406,80 @@ def plot_wash_notional_by_date_bar(df: pd.DataFrame, freq: str = "D", out_dir=No
     )
 
 
-def wash_trading_pairs_analysis(dfwash: pd.DataFrame, token: str, detector_type: str):
+
+def wash_trade_summary(df_trades: pd.DataFrame, df_wash: pd.DataFrame, out_dir=None):
+    """
+    Compare df_trades with df_wash and return summary stats.
+
+    Returns a DataFrame with:
+      - total trades count
+      - total volume (price * size)
+      - percentage of trades/volume
+      - mean price and size
+    """
+    # Compute total volume for all trades
+    df_trades['trade_volume'] = df_trades['price'] * df_trades['size']
+
+    # Flatten df_wash into individual trades
+    wash_buyers = df_wash[['t1', 'price1', 'size1', 'side1', 'pair_id']].rename(
+        columns={'t1':'time', 'price1':'price', 'size1':'size', 'side1':'side'}
+    )
+    wash_sellers = df_wash[['t2', 'price2', 'size2', 'side2', 'pair_id']].rename(
+        columns={'t2':'time', 'price2':'price', 'size2':'size', 'side2':'side'}
+    )
+
+    df_wash_trades = pd.concat([wash_buyers, wash_sellers], ignore_index=True)
+    df_wash_trades['trade_volume'] = df_wash_trades['price'] * df_wash_trades['size']
+
+    # Total stats
+    total_trades = len(df_trades)
+    total_volume = df_trades['trade_volume'].sum()
+
+    # Wash trades stats
+    wash_trades_count = len(df_wash_trades)
+    wash_volume = df_wash_trades['trade_volume'].sum()
+
+    # Non-wash trades stats
+    non_wash_count = total_trades - wash_trades_count
+    non_wash_volume = total_volume - wash_volume
+
+    # Average price and size
+    avg_price_wash = df_wash_trades['price'].mean()
+    avg_size_wash = df_wash_trades['size'].mean()
+    avg_price_non = df_trades[~df_trades.index.isin(df_wash_trades.index)]['price'].mean()
+    avg_size_non = df_trades[~df_trades.index.isin(df_wash_trades.index)]['size'].mean()
+
+    # Build summary DataFrame
+    summary = pd.DataFrame({
+        'Category': ['Wash Trades', 'Non-Wash Trades', 'Total'],
+        'Count': [wash_trades_count, non_wash_count, total_trades],
+        'Count %': [wash_trades_count/total_trades*100,
+                    non_wash_count/total_trades*100, 100],
+        'Volume': [wash_volume, non_wash_volume, total_volume],
+        'Volume %': [wash_volume/total_volume*100,
+                     non_wash_volume/total_volume*100, 100],
+        'Avg Price': [avg_price_wash, avg_price_non, df_trades['price'].mean()],
+        'Avg Size': [avg_size_wash, avg_size_non, df_trades['size'].mean()]
+    })
+
+    if out_dir:
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        summary.to_csv(Path(out_dir) / f"wash_trade_summary.csv")
+
+    return summary
+
+
+
+def wash_trading_pairs_analysis(df_wash: pd.DataFrame, token: str, detector_type: str):
     out_dir_path = os.path.join(ANALYSIS_DIR, token, detector_type)
 
-    make_dfwash_plots(dfwash, out_dir=os.path.join(out_dir_path, "plots_dfwash_general"), show=False, top_wallets=25)
-    global_snapshot(dfwash, out_dir=os.path.join(out_dir_path, "plots_dfwash_general"), fname=f"global_snapshot_{token}.json")
+    make_dfwash_plots(df_wash, out_dir=os.path.join(out_dir_path, "plots_dfwash_general"), show=False, top_wallets=25)
+    global_snapshot(df_wash, out_dir=os.path.join(out_dir_path, "plots_dfwash_general"), fname=f"global_snapshot_{token}.json")
 
-    per_wallet_leaderboard(dfwash, top=50, out_dir=os.path.join(out_dir_path, "plots_dfwash_general"))
-    plot_wash_volume_by_date_bar(dfwash, freq="D", out_dir=os.path.join(out_dir_path, "plots_dfwash_general"), show=False)
-    plot_wash_notional_by_date_bar(dfwash, freq="D", out_dir=os.path.join(out_dir_path, "plots_dfwash_general"), show=False)
+    per_wallet_leaderboard(df_wash, top=50, out_dir=os.path.join(out_dir_path, "plots_dfwash_general"))
+    plot_wash_volume_by_date_bar(df_wash, freq="D", out_dir=os.path.join(out_dir_path, "plots_dfwash_general"), show=False)
+    plot_wash_notional_by_date_bar(df_wash, freq="D", out_dir=os.path.join(out_dir_path, "plots_dfwash_general"), show=False)
+
+    store = CoinDataStore(token, engine="fastparquet")
+    df_trades = store.load_all()
+    wash_trade_summary(df_trades, df_wash, out_dir=os.path.join(out_dir_path, "plots_dfwash_general"))

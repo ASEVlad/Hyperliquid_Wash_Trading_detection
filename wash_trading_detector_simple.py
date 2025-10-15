@@ -15,8 +15,8 @@ def main():
 
     token_list = os.listdir(DATA_DIR)
     for token in token_list:
+        logger.info(f"Token: {token} is Processing")
         store = CoinDataStore(token, engine="fastparquet")
-        print(store.list_days())
         time_diff_s = 10 * 60  # 10 minutes difference
         price_diff_pct = 0.01
         size_diff_pct = 0.01
