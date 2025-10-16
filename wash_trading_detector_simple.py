@@ -15,14 +15,15 @@ def main():
 
     token_list = os.listdir(DATA_DIR)
     for token in token_list:
-        logger.info(f"Token: {token} is Processing")
-        store = CoinDataStore(token, engine="fastparquet")
-        time_diff_s = 10 * 60  # 10 minutes difference
-        price_diff_pct = 0.01
-        size_diff_pct = 0.01
-        df_detected = detect_wash_trades_nearest(store, time_diff_s, price_diff_pct, size_diff_pct)
-        dfwash = detected_to_dfwash_full(df_detected)
-        wash_trading_pairs_analysis(dfwash, token, "simple_detector")
+        if not token.endswith(".csv"):
+            logger.info(f"Token: {token} is Processing")
+            store = CoinDataStore(token, engine="fastparquet")
+            time_diff_s = 10 * 60  # 10 minutes difference
+            price_diff_pct = 0.01
+            size_diff_pct = 0.01
+            df_detected = detect_wash_trades_nearest(store, time_diff_s, price_diff_pct, size_diff_pct)
+            dfwash = detected_to_dfwash_full(df_detected)
+            wash_trading_pairs_analysis(dfwash, token, "simple_detector")
 
 
 if __name__ == "__main__":
