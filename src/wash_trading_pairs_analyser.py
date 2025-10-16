@@ -195,7 +195,6 @@ def make_dfwash_plots(df, out_dir="plots_dfwash", show=False, top_wallets=20):
 
     # guard: nothing to plot
     if df.empty:
-        print("DFWash is empty—no plots produced.")
         return
 
     plot_pairs_by_hour(df, out_dir, show)
@@ -209,8 +208,6 @@ def make_dfwash_plots(df, out_dir="plots_dfwash", show=False, top_wallets=20):
     plot_top_wallets(df, metric="n_pairs", top=top_wallets, out_dir=out_dir, show=show)
     plot_top_wallets(df, metric="wash_volume", top=top_wallets, out_dir=out_dir, show=show)
     plot_same_price_share_top_wallets(df, top=top_wallets, out_dir=out_dir, show=show)
-
-    print(f"Saved plots to: {out_dir.resolve()}")
 
 
 
