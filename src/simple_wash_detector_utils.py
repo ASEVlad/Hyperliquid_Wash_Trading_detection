@@ -201,6 +201,12 @@ def detect_wash_trades_nearest(
 
         day_events = pd.concat([d1, d2], ignore_index=True)
         if not day_events.empty:
+            # Instead of relying on drop_duplicates in each direction, apply global pruning:
+            day_events = _prune_pairs_greedy_no_reuse(
+                day_events,
+                sort_cols=("wallet_id", "duration_s", "price_change_pct"),
+                ascending=(True, True, True)
+            )
             all_events.append(day_events)
 
     if not all_events:
@@ -235,6 +241,42 @@ def detect_wash_trades_nearest(
         ]
     ]
     return events
+
+
+def _prune_pairs_greedy_no_reuse(candidates: pd.DataFrame,
+                                 sort_cols=("wallet_id", "duration_s", "price_change_pct"),
+                                 ascending=(True, True, True)) -> pd.DataFrame:
+    """
+    Greedy 1-to-1 pruning across all candidate pairs:
+      - candidates: concatenated d1 + d2 with open_row_id and close_row_id present
+      - sort_cols: ordering to prefer better matches first (default: smaller duration, smaller price diff)
+    Returns pruned DataFrame where no open_row_id or close_row_id is reused.
+    """
+    if candidates.empty:
+        return candidates
+
+    # Ensure deterministic order
+    if isinstance(sort_cols, str):
+        sort_cols = (sort_cols,)
+    if isinstance(ascending, bool):
+        ascending = tuple([ascending] * len(sort_cols))
+
+    cand = candidates.sort_values(list(sort_cols), ascending=list(ascending), kind="mergesort").copy()
+
+    used_id = set()
+
+    keep_idx = []
+    for i, row in cand.iterrows():
+        o = int(row["open_row_id"])
+        c = int(row["close_row_id"])
+        if (o in used_id) or (c in used_id):
+            continue
+        used_id.add(o)
+        used_id.add(c)
+        keep_idx.append(i)
+
+    pruned = cand.loc[keep_idx].reset_index(drop=True)
+    return pruned
 
 
 def detected_to_dfwash_full(df_detected: pd.DataFrame) -> pd.DataFrame:
@@ -275,7 +317,7 @@ def detected_to_dfwash_full(df_detected: pd.DataFrame) -> pd.DataFrame:
     mapped["size_err_pct"] = (mapped["size_ratio"] - 1.0).abs().astype("float32") * 100.0
     base = mapped["price1"].replace(0, np.nan)
     mapped["price_change_pct"] = ((mapped["price2"] - mapped["price1"]) / base).astype("float32")
-    mapped["abs_price_change_bps"] = (mapped["price_change_pct"].abs() * 1e4).astype("float32")
+    mapped["price_change_bps"] = (mapped["price_change_pct"] * 1e4).astype("float32")
     mapped["same_price"] = (mapped["price2"] - mapped["price1"]).abs() <= 1e-8
     mapped["date"] = mapped["t1"].dt.date
     mapped["hour"] = mapped["t1"].dt.hour.astype("int16")

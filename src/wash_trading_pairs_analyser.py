@@ -103,15 +103,15 @@ def plot_size_error_hist(df, out_dir=None, show=False):
     plt.close()
 
 def plot_price_change_bps_hist(df, out_dir=None, show=False):
-    x = df["abs_price_change_bps"].dropna().to_numpy()
+    x = df["price_change_bps"].dropna().to_numpy()
     plt.figure(figsize=(8,4))
     bins = min(200, max(20, int(np.sqrt(max(len(x),1)))))
     plt.hist(x, bins=bins)
-    plt.title("Absolute price change per pair (bps)")
-    plt.xlabel("|Δprice / price1| × 10,000")
+    plt.title("Price change per pair (bps)")
+    plt.xlabel("Δprice / price1 × 10,000")
     plt.ylabel("Count")
     plt.tight_layout()
-    if out_dir: plt.savefig(Path(out_dir) / "abs_price_change_bps_hist.png", dpi=150)
+    if out_dir: plt.savefig(Path(out_dir) / "price_change_bps_hist.png", dpi=150)
     if show: plt.show()
     plt.close()
 
@@ -260,7 +260,7 @@ def per_wallet_leaderboard(
         q90_dt_s=("dt_s", lambda s: s.quantile(0.9)),
         median_size_err_pct=("size_err_pct", "median"),
         same_price_share=("same_price", "mean"),
-        mean_abs_price_bps=("abs_price_change_bps", "mean"),
+        mean_price_bps=("price_change_pct", "mean"),
     ).reset_index()
 
     # Direction balance: |buy->sell - sell->buy| / (buy->sell + sell->buy)
@@ -295,7 +295,7 @@ def per_wallet_leaderboard(
     out["q90_dt_s"] = out["q90_dt_s"].astype("float32")
     out["median_size_err_pct"] = out["median_size_err_pct"].astype("float32")
     out["same_price_share"] = out["same_price_share"].astype("float32")
-    out["mean_abs_price_bps"] = out["mean_abs_price_bps"].astype("float32")
+    out["mean_price_bps"] = out["mean_price_bps"].astype("float32")
 
     # Optional: save
     if out_dir is not None:
