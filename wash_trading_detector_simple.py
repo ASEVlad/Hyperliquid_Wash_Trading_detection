@@ -18,7 +18,7 @@ def main():
         if not token.endswith(".csv") and token == "AVAX":
             logger.info(f"Token: {token} is Processing")
             store = CoinDataStore(token, engine="fastparquet")
-            time_diff_s = 20 * 60 # 10 minutes difference
+            time_diff_s = 10 * 60 # 10 minutes difference
             price_diff_pct = 0.01
             size_diff_pct = 0.01
             df_detected = detect_wash_trades_nearest(store, time_diff_s, price_diff_pct, size_diff_pct)

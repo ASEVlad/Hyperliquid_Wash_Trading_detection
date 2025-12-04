@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from scipy.stats import binom
 
 from src.data_handler import CoinDataStore
 
@@ -36,6 +37,7 @@ def _to_long_per_wallet(df_day: pd.DataFrame) -> pd.DataFrame:
 
 def _aggregate_microfills_long(
     long_df: pd.DataFrame,
+    randomization = None,
     bin_freq: str = "50ms",
     round_mode: str = "ceil",   # "ceil" | "floor" | "round"
 ) -> pd.DataFrame:
@@ -68,7 +70,10 @@ def _aggregate_microfills_long(
     g = g.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
     g["wallet_id"] = g["wallet_id"].astype("uint64", copy=False)
     g["size"] = g["size"].astype("float32", copy=False)
-    return g
+    if randomization:
+        return randomization(g)
+    else:
+        return g
 
 
 def _one_direction_pair(open_df: pd.DataFrame, close_df: pd.DataFrame,
@@ -160,6 +165,7 @@ def detect_wash_trades_nearest(
     size_diff_pct: float,
     bin_freq: str = "50ms",
     round_mode: str = "ceil",
+    is_final_filtration: bool = True
 ) -> pd.DataFrame:
     """
     Wash-trading detector for schema: price, size, time, seller, buyer.
@@ -173,6 +179,7 @@ def detect_wash_trades_nearest(
     Returns one row per flagged pair with timings, sides, prices, sizes, and directions.
     """
     all_events = []
+    df_trades_counts = pd.Series(name="count")
 
     for df_day in store.iter_days():
         if df_day.empty:
@@ -194,6 +201,11 @@ def detect_wash_trades_nearest(
 
         buys  = df[df["side"] == "buy"].copy()
         sells = df[df["side"] == "sell"].copy()
+
+        df_trades_counts = pd.concat([
+            df_trades_counts,
+            df.groupby("wallet_id")["size"].count()
+        ], axis=1).sum(axis=1)
 
         # C) Two directions
         d1 = _one_direction_pair(buys,  sells, time_diff_s, price_diff_pct, size_diff_pct, "buy_to_sell")
@@ -227,6 +239,9 @@ def detect_wash_trades_nearest(
 
     # Assign a simple pair_id (one row == one pair)
     events["pair_id"] = np.arange(len(events), dtype=np.int64)
+
+    if is_final_filtration:
+        events = final_filtration(df_trades_counts, events)
 
     # Final tidy order
     events = events[
@@ -329,3 +344,115 @@ def detected_to_dfwash_full(df_detected: pd.DataFrame) -> pd.DataFrame:
     df_full = df_full.loc[:, ~df_full.columns.duplicated()]
 
     return df_full
+
+
+def final_filtration(df_trades_counts, df_detected, p0=0.01):
+    def threshold_binomial(df_counts, p0=0.01, alpha=0.01):
+        df = df_counts.copy()
+
+        # Compute p-values: P(X >= observed | Bin(n, p0))
+        df["p_value"] = df.apply(
+            lambda row: 1 - binom.cdf(row["wash_count"] - 1, row["count"], p0)
+            if row["count"] > 0 else 1.0,
+            axis=1
+        )
+
+        # Significant wallets
+        df["is_suspicious"] = df["p_value"] < alpha
+
+        return df
+
+    df_counts = pd.concat([
+        df_trades_counts,
+        df_detected.groupby("wallet_id")["open_size"].count() * 2,
+    ], axis=1).rename(columns={0:"count", "open_size":"wash_count"}).fillna(0)
+
+    res_binom = threshold_binomial(df_counts, p0=p0, alpha=0.01)
+    wallets_to_keep = res_binom[res_binom["is_suspicious"]].index
+
+    return df_detected[df_detected["wallet_id"].isin(wallets_to_keep)]
+
+
+def detect_wash_trades_local(
+    df_all: pd.DataFrame,
+    time_diff_s: int,
+    price_diff_pct: float,
+    size_diff_pct: float,
+    randomization,
+    bin_freq: str = "50ms",
+    round_mode: str = "ceil",
+    is_final_filtration: bool = True,
+) -> pd.DataFrame:
+
+    all_events = []
+    df_trades_counts = pd.Series(name="count")
+    # Group the entire DataFrame by the date part of the 'time' column
+    grouped = df_all.groupby(df_all["time"].dt.date)
+
+    for day, df_day in grouped:
+
+        if df_day.empty:
+            continue
+
+        # A) Long view per wallet (buy/sell events)
+        long_df = _to_long_per_wallet(df_day)
+        if long_df.empty:
+            continue
+
+        # B) Aggregate micro-fills
+        agg = _aggregate_microfills_long(long_df, randomization, bin_freq=bin_freq, round_mode=round_mode)
+        if agg.empty:
+            continue
+
+        df = agg.sort_values("time").reset_index(drop=True).copy()
+        df["row_id"] = np.arange(len(df), dtype=np.int64)  # stable within day
+        df["day"] = df["time"].dt.date
+
+        buys  = df[df["side"] == "buy"].copy()
+        sells = df[df["side"] == "sell"].copy()
+
+        df_trades_counts = pd.concat([
+            df_trades_counts,
+            df.groupby("wallet_id")["size"].count()
+        ], axis=1).sum(axis=1)
+
+        # C) Two directions
+        d1 = _one_direction_pair(buys,  sells, time_diff_s, price_diff_pct, size_diff_pct, "buy_to_sell")
+        d2 = _one_direction_pair(sells, buys,  time_diff_s, price_diff_pct, size_diff_pct, "sell_to_buy")
+
+        day_events = pd.concat([d1, d2], ignore_index=True)
+        if not day_events.empty:
+            # Instead of relying on drop_duplicates in each direction, apply global pruning:
+            day_events = _prune_pairs_greedy_no_reuse(
+                day_events,
+                sort_cols=("wallet_id", "duration_s", "price_change_pct"),
+                ascending=(True, True, True)
+            )
+            all_events.append(day_events)
+
+    if all_events:
+        events = pd.concat(all_events, ignore_index=True)
+        events = events.sort_values(["day","wallet_id","open_time","close_time"]).reset_index(drop=True)
+
+        # Assign a simple pair_id (one row == one pair)
+        events["pair_id"] = np.arange(len(events), dtype=np.int64)
+
+        if is_final_filtration:
+            events = final_filtration(df_trades_counts, events)
+
+        # Final tidy order
+        events = events[
+            [
+                "wallet_id","day",
+                "open_time","close_time","duration_s",
+                "open_side","close_side",
+                "open_price","close_price","price_change_pct",
+                "open_size","close_size","size_change_pct",
+                "pairing_direction",
+                "pair_id",
+            ]
+        ]
+        return events
+
+    else:
+        print("No wash trading detected")
