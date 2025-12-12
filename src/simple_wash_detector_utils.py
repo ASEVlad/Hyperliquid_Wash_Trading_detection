@@ -37,7 +37,6 @@ def _to_long_per_wallet(df_day: pd.DataFrame) -> pd.DataFrame:
 
 def _aggregate_microfills_long(
     long_df: pd.DataFrame,
-    randomization = None,
     bin_freq: str = "50ms",
     round_mode: str = "ceil",   # "ceil" | "floor" | "round"
 ) -> pd.DataFrame:
@@ -70,10 +69,7 @@ def _aggregate_microfills_long(
     g = g.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
     g["wallet_id"] = g["wallet_id"].astype("uint64", copy=False)
     g["size"] = g["size"].astype("float32", copy=False)
-    if randomization:
-        return randomization(g)
-    else:
-        return g
+    return g
 
 
 def _one_direction_pair(open_df: pd.DataFrame, close_df: pd.DataFrame,
@@ -400,9 +396,12 @@ def detect_wash_trades_local(
             continue
 
         # B) Aggregate micro-fills
-        agg = _aggregate_microfills_long(long_df, randomization, bin_freq=bin_freq, round_mode=round_mode)
+        agg = _aggregate_microfills_long(long_df, bin_freq=bin_freq, round_mode=round_mode)
         if agg.empty:
             continue
+
+        if randomization:
+            agg = randomization(agg)
 
         df = agg.sort_values("time").reset_index(drop=True).copy()
         df["row_id"] = np.arange(len(df), dtype=np.int64)  # stable within day
