@@ -21,7 +21,16 @@ def main():
             time_diff_s = 5 * 60 # 10 minutes difference
             price_diff_pct = 0.01
             size_diff_pct = 0.01
-            df_detected = detect_wash_trades_nearest(store, time_diff_s, price_diff_pct, size_diff_pct)
+            is_final_filtration = True
+
+            df_detected = detect_wash_trades_nearest(
+                store=store,
+                time_diff_s=time_diff_s,
+                price_diff_pct=price_diff_pct,
+                size_diff_pct=size_diff_pct,
+                is_final_filtration=is_final_filtration
+            )
+
             dfwash = detected_to_dfwash_full(df_detected)
             wash_trading_pairs_analysis(dfwash, token, "simple_detector")
 
