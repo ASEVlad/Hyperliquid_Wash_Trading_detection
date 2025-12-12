@@ -7,6 +7,9 @@ from src.data_handler import CoinDataStore
 from src.simple_wash_detector_utils import detect_wash_trades_nearest, detected_to_dfwash_full
 from src.wash_trading_pairs_analyser import wash_trading_pairs_analysis
 
+import warnings
+warnings.filterwarnings("ignore")
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = Path(os.path.join(BASE_DIR, "..", "data"))
 
