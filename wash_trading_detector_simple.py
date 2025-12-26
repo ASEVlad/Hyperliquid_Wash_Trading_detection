@@ -21,7 +21,7 @@ def main():
         if not token.endswith(".csv"):
             logger.info(f"Token: {token} is Processing")
             store = CoinDataStore(token, engine="fastparquet")
-            time_diff_s = 5 * 60 # 10 minutes difference
+            time_diff_s = 5 * 60 # 5 minutes difference
             price_diff_pct = 0.01
             size_diff_pct = 0.01
             is_final_filtration = True

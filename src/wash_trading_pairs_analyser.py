@@ -469,6 +469,7 @@ def wash_trade_summary(df_trades: pd.DataFrame, df_wash: pd.DataFrame, out_dir=N
 
 def wash_trading_pairs_analysis(df_wash: pd.DataFrame, token: str, detector_type: str):
     out_dir_path = os.path.join(ANALYSIS_DIR, token, detector_type)
+    df_wash.to_csv(os.path.join(out_dir_path, "plots_dfwash_general", "df_wash_general.csv"), index=False)
 
     make_dfwash_plots(df_wash, out_dir=os.path.join(out_dir_path, "plots_dfwash_general"), show=False, top_wallets=25)
     global_snapshot(df_wash, out_dir=os.path.join(out_dir_path, "plots_dfwash_general"), fname=f"global_snapshot_{token}.json")
